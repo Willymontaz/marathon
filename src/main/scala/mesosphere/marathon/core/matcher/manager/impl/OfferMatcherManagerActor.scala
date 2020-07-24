@@ -190,19 +190,60 @@ private[impl] class OfferMatcherManagerActor private (
     (random.shuffle(reserved) ++ random.shuffle(normal)).to(Queue)
   }
 
+  /*
+   * Mesos can send an offer containing both a resource revocable and the same resource type as non revocable
+   * Clean to keep only revocable in the offer
+   *
+   * Note that a resource like 'port' will not be filtered, as it is not considered revocable
+   * and this marathon instance will need to use non revocable 'port' to launch tasks
+   */
+  def clearNonRevocableResourcesForConsideredRevocableKind(offer: Offer): Offer = {
+    val offerBuilder = Offer
+      .newBuilder(offer)
+      .clearResources()
+
+    val consideredRevocableOffers = Array("cpus")
+
+    offer
+      .getResourcesList
+      .stream()
+      .filter(res => !consideredRevocableOffers.contains(res.getName) || res.hasRevocable)
+      .forEach(res => offerBuilder.addResources(res))
+
+    offerBuilder.build()
+  }
+
+  def debugOffer(offer: Offer) = {
+    offer.getResourcesList.forEach(res => {
+      if (res.hasRevocable)
+        logger.info(s" --- WMO --- found resource with revocable ${res.getType} ${res.getName} ${res.getScalar}")
+      else
+        logger.info(s" --- WMO --- found resource non revocable ${res.getType} ${res.getName} ${res.getScalar}")
+    })
+  }
+
   def receiveProcessOffer: Receive = {
     case ActorOfferMatcher.MatchOffer(offer: Offer, promise: Promise[OfferMatcher.MatchedInstanceOps]) if !offersWanted =>
-      completeWithNoMatch("No offers wanted", offer, promise, resendThisOffer = matchers.nonEmpty)
+      val newOffer = clearNonRevocableResourcesForConsideredRevocableKind(offer)
+      logger.info(s" --- WMO --- does not want offer but still checking offer ${newOffer.getId}")
+      debugOffer(newOffer)
+
+      completeWithNoMatch("No offers wanted", newOffer, promise, resendThisOffer = matchers.nonEmpty)
 
     case ActorOfferMatcher.MatchOffer(offer: Offer, promise: Promise[OfferMatcher.MatchedInstanceOps]) =>
+
+      val newOffer = clearNonRevocableResourcesForConsideredRevocableKind(offer)
+      logger.info(s" --- WMO --- processing offer after cleaning non revocable resources ${newOffer.getId}")
+      debugOffer(newOffer)
+
       val deadline = clock.now() + conf.offerMatchingTimeout()
       if (offerQueues.size < conf.maxParallelOffers()) {
-        startProcessOffer(offer, deadline, promise)
+        startProcessOffer(newOffer, deadline, promise)
       } else if (unprocessedOffers.size < conf.maxQueuedOffers()) {
-        logger.debug(s"The maximum number of configured offers is processed at the moment. Queue offer ${offer.getId.getValue}.")
-        unprocessedOffers ::= UnprocessedOffer(offer, deadline, promise)
+        logger.debug(s"The maximum number of configured offers is processed at the moment. Queue offer ${newOffer.getId.getValue}.")
+        unprocessedOffers ::= UnprocessedOffer(newOffer, deadline, promise)
       } else {
-        completeWithNoMatch("Queue is full", offer, promise, resendThisOffer = true)
+        completeWithNoMatch("Queue is full", newOffer, promise, resendThisOffer = true)
       }
     case CleanUpOverdueOffers =>
       logger.debug(
