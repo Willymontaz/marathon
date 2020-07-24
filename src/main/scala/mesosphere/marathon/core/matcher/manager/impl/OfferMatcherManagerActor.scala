@@ -1,12 +1,12 @@
 package mesosphere.marathon
 package core.matcher.manager.impl
 
-import akka.stream.scaladsl.SourceQueue
 import java.time.Clock
 
 import akka.actor.{Actor, Cancellable, Props}
 import akka.event.LoggingReceive
 import akka.pattern.pipe
+import akka.stream.scaladsl.SourceQueue
 import com.typesafe.scalalogging.StrictLogging
 import mesosphere.marathon.core.instance.LocalVolumeId
 import mesosphere.marathon.core.matcher.base.OfferMatcher
@@ -16,12 +16,12 @@ import mesosphere.marathon.core.matcher.manager.OfferMatcherManagerConfig
 import mesosphere.marathon.core.matcher.manager.impl.OfferMatcherManagerActor.{CleanUpOverdueOffers, MatchOfferData, UnprocessedOffer}
 import mesosphere.marathon.metrics.{Metrics, SettableGauge}
 import mesosphere.marathon.state.{PathId, Timestamp}
-import scala.jdk.CollectionConverters._
 import mesosphere.marathon.tasks.ResourceUtil
 import org.apache.mesos.Protos.{Offer, OfferID}
 
 import scala.collection.immutable.Queue
 import scala.concurrent.Promise
+import scala.jdk.CollectionConverters._
 import scala.util.Random
 import scala.util.control.NonFatal
 
@@ -38,12 +38,12 @@ private[manager] class OfferMatcherManagerActorMetrics(metrics: Metrics) {
   */
 private[manager] object OfferMatcherManagerActor {
   def props(
-      metrics: OfferMatcherManagerActorMetrics,
-      random: Random,
-      clock: Clock,
-      offerMatcherConfig: OfferMatcherManagerConfig,
-      offersWantedInput: SourceQueue[Boolean]
-  ): Props = {
+             metrics: OfferMatcherManagerActorMetrics,
+             random: Random,
+             clock: Clock,
+             offerMatcherConfig: OfferMatcherManagerConfig,
+             offersWantedInput: SourceQueue[Boolean]
+           ): Props = {
     Props(new OfferMatcherManagerActor(metrics, random, clock, offerMatcherConfig, offersWantedInput))
   }
 
@@ -51,24 +51,25 @@ private[manager] object OfferMatcherManagerActor {
     * Internal data structure that bundles all related data if an offer is processed.
     *
     * @constructor Create a new instance that bundles offer and ops.
-    * @param offer The offer that is matched.
-    * @param promise promise for matched instance ops.
-    * @param matcherQueue The offer matchers which should be applied to the offer.
-    * @param ops All matched operations that should be applied to the offer.
-    * @param matchPasses the number of cycles the offer has been passed to the list of matchers.
+    * @param offer           The offer that is matched.
+    * @param promise         promise for matched instance ops.
+    * @param matcherQueue    The offer matchers which should be applied to the offer.
+    * @param ops             All matched operations that should be applied to the offer.
+    * @param matchPasses     the number of cycles the offer has been passed to the list of matchers.
     * @param resendThisOffer true if there are matcher that want to see this offer again, otherwise false.
     */
   private[impl] case class MatchOfferData(
-      offer: Offer,
-      deadline: Timestamp,
-      promise: Promise[OfferMatcher.MatchedInstanceOps],
-      matcherQueue: Queue[OfferMatcher] = Queue.empty,
-      ops: Seq[InstanceOpWithSource] = Seq.empty,
-      matchPasses: Int = 0,
-      resendThisOffer: Boolean = false
-  ) {
+                                           offer: Offer,
+                                           deadline: Timestamp,
+                                           promise: Promise[OfferMatcher.MatchedInstanceOps],
+                                           matcherQueue: Queue[OfferMatcher] = Queue.empty,
+                                           ops: Seq[InstanceOpWithSource] = Seq.empty,
+                                           matchPasses: Int = 0,
+                                           resendThisOffer: Boolean = false
+                                         ) {
 
     def addMatcher(matcher: OfferMatcher): MatchOfferData = copy(matcherQueue = matcherQueue.enqueue(matcher))
+
     def nextMatcherOpt: Option[(OfferMatcher, MatchOfferData)] = {
       matcherQueue.dequeueOption map {
         case (nextMatcher, newQueue) => nextMatcher -> copy(matcherQueue = newQueue)
@@ -90,6 +91,7 @@ private[manager] object OfferMatcherManagerActor {
     */
   private[impl] case class UnprocessedOffer(offer: Offer, deadline: Timestamp, promise: Promise[OfferMatcher.MatchedInstanceOps]) {
     def isOverdue(clock: Clock): Boolean = clock.now() >= deadline
+
     def notOverdue(clock: Clock): Boolean = !isOverdue(clock)
   }
 
@@ -97,16 +99,17 @@ private[manager] object OfferMatcherManagerActor {
     * Recurrent timer tick to clean up overdue offers.
     */
   private case object CleanUpOverdueOffers
+
 }
 
-private[impl] class OfferMatcherManagerActor private (
-    metrics: OfferMatcherManagerActorMetrics,
-    random: Random,
-    clock: Clock,
-    conf: OfferMatcherManagerConfig,
-    offersWantedInput: SourceQueue[Boolean]
-) extends Actor
-    with StrictLogging {
+private[impl] class OfferMatcherManagerActor private(
+                                                      metrics: OfferMatcherManagerActorMetrics,
+                                                      random: Random,
+                                                      clock: Clock,
+                                                      conf: OfferMatcherManagerConfig,
+                                                      offersWantedInput: SourceQueue[Boolean]
+                                                    ) extends Actor
+  with StrictLogging {
 
   var launchTokens: Int = 0
 
@@ -173,6 +176,7 @@ private[impl] class OfferMatcherManagerActor private (
   }
 
   def offersWanted: Boolean = matchers.nonEmpty && launchTokens > 0
+
   def updateOffersWanted(): Unit = offersWantedInput.offer(offersWanted)
 
   def offerMatchers(offer: Offer): Queue[OfferMatcher] = {
@@ -190,19 +194,53 @@ private[impl] class OfferMatcherManagerActor private (
     (random.shuffle(reserved) ++ random.shuffle(normal)).to(Queue)
   }
 
+  def clearNonRevocableResources(offer: Offer): Offer = {
+    val offerBuilder = Offer
+      .newBuilder(offer)
+      .clearResources()
+
+    val consideredRevocableOffers = Array("cpus", "mem")
+
+    offer
+      .getResourcesList
+      .stream()
+      .filter(res => !consideredRevocableOffers.contains(res.getName) || res.hasRevocable)
+      .forEach(res => offerBuilder.addResources(res))
+
+    offerBuilder.build()
+  }
+
+  def debugOffer(offer: Offer) = {
+    offer.getResourcesList.forEach(res => {
+      if (res.hasRevocable)
+        logger.info(s" --- WMO --- found resource with revocable ${res.getType} ${res.getName} ${res.getScalar}")
+      else
+        logger.info(s" --- WMO --- found resource non revocable ${res.getType} ${res.getName} ${res.getScalar}")
+    })
+  }
+
   def receiveProcessOffer: Receive = {
     case ActorOfferMatcher.MatchOffer(offer: Offer, promise: Promise[OfferMatcher.MatchedInstanceOps]) if !offersWanted =>
-      completeWithNoMatch("No offers wanted", offer, promise, resendThisOffer = matchers.nonEmpty)
+      val newOffer = clearNonRevocableResources(offer)
+      logger.info(s" --- WMO --- does not want offer but still checking offer ${newOffer.getId}")
+      debugOffer(newOffer)
+
+      completeWithNoMatch("No offers wanted", newOffer, promise, resendThisOffer = matchers.nonEmpty)
 
     case ActorOfferMatcher.MatchOffer(offer: Offer, promise: Promise[OfferMatcher.MatchedInstanceOps]) =>
+
+      val newOffer = clearNonRevocableResources(offer)
+      logger.info(s" --- WMO --- processing offer after cleaning non revocable resources ${newOffer.getId}")
+      debugOffer(newOffer)
+
       val deadline = clock.now() + conf.offerMatchingTimeout()
       if (offerQueues.size < conf.maxParallelOffers()) {
-        startProcessOffer(offer, deadline, promise)
+        startProcessOffer(newOffer, deadline, promise)
       } else if (unprocessedOffers.size < conf.maxQueuedOffers()) {
-        logger.debug(s"The maximum number of configured offers is processed at the moment. Queue offer ${offer.getId.getValue}.")
-        unprocessedOffers ::= UnprocessedOffer(offer, deadline, promise)
+        logger.debug(s"The maximum number of configured offers is processed at the moment. Queue offer ${newOffer.getId.getValue}.")
+        unprocessedOffers ::= UnprocessedOffer(newOffer, deadline, promise)
       } else {
-        completeWithNoMatch("Queue is full", offer, promise, resendThisOffer = true)
+        completeWithNoMatch("Queue is full", newOffer, promise, resendThisOffer = true)
       }
     case CleanUpOverdueOffers =>
       logger.debug(

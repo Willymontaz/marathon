@@ -91,6 +91,9 @@ object MarathonSchedulerDriver extends StrictLogging {
     frameworkInfoBuilder.addCapabilities(Capability.newBuilder().setType(Capability.Type.MULTI_ROLE))
     logger.info("MULTI_ROLE feature enabled")
 
+    frameworkInfoBuilder.addCapabilities(Capability.newBuilder().setType(Capability.Type.REVOCABLE_RESOURCES))
+    logger.info(" --- WMO --- revocable resources feature enabled")
+
     frameworkInfoBuilder.build()
   }
 
